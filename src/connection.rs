@@ -2,6 +2,8 @@ use crate::command::PingCommand;
 use crate::response::RedisResponse;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
+use std::thread;
 
 pub trait ConnectionHandler {
     fn handle_client(&self, stream: TcpStream);
@@ -12,6 +14,13 @@ pub struct RedisConnectionHandler;
 impl RedisConnectionHandler {
     pub fn new() -> Self {
         RedisConnectionHandler {}
+    }
+
+    pub fn handle_concurrent_clients(self: Arc<Self>, stream: TcpStream) {
+        let handler = Arc::clone(&self);
+        thread::spawn(move || {
+            handler.handle_client(stream);
+        });
     }
 }
 
