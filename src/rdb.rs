@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter};
-use std::time::Instant;
+use std::time::SystemTime;
 
 #[derive(Serialize, Deserialize)]
 pub struct RedisData {
     pub store: HashMap<String, String>,
-    pub expiry: HashMap<String, Instant>,
+    pub expiry: HashMap<String, Option<SystemTime>>,
 }
 
 pub struct RdbPersistence {

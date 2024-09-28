@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub trait ConnectionHandler {
     fn handle_client(&self, stream: TcpStream);
@@ -14,7 +14,7 @@ pub trait ConnectionHandler {
 
 pub struct RedisConnectionHandler {
     store: Arc<Mutex<HashMap<String, String>>>,
-    expiry: Arc<Mutex<HashMap<String, Instant>>>,
+    pub expiry: Arc<Mutex<HashMap<String, Option<SystemTime>>>>,
     rdb: RdbPersistence,
 }
 
@@ -30,7 +30,7 @@ impl RedisConnectionHandler {
 
         handler.load_from_rdb();
 
-        handler.start_expiry_cleanup(); 
+        handler.start_expiry_cleanup();
         handler
     }
 
@@ -45,18 +45,47 @@ impl RedisConnectionHandler {
         if let Some(redis_data) = self.rdb.load_from_rdb() {
             let mut store = self.store.lock().unwrap();
             let mut expiry = self.expiry.lock().unwrap();
+
+            let expiry_deserialized: HashMap<String, Option<SystemTime>> = redis_data
+                .expiry
+                .iter()
+                .map(|(key, &system_time_opt)| {
+                    let new_system_time_opt = system_time_opt.and_then(|system_time| {
+                        system_time
+                            .duration_since(SystemTime::now())
+                            .ok()
+                            .map(|duration| SystemTime::now() + duration)
+                    });
+                    (key.clone(), new_system_time_opt)
+                })
+                .collect();
+
             *store = redis_data.store;
-            *expiry = redis_data.expiry;
+            *expiry = expiry_deserialized;
         }
     }
 
     pub fn save_to_rdb(&self) {
         let store = self.store.lock().unwrap();
         let expiry = self.expiry.lock().unwrap();
+
+        let expiry_serializable: HashMap<String, Option<SystemTime>> = expiry
+            .iter()
+            .map(|(key, &instant)| {
+                let system_time = match instant {
+                    Some(time) => time,
+                    None => SystemTime::now(),
+                };
+                let system_time = system_time + (Instant::now() - Instant::now());
+                (key.clone(), Some(system_time))
+            })
+            .collect();
+
         let redis_data = RedisData {
             store: store.clone(),
-            expiry: expiry.clone(),
+            expiry: expiry_serializable,
         };
+
         self.rdb.save_to_rdb(&redis_data);
     }
 
@@ -64,23 +93,26 @@ impl RedisConnectionHandler {
         let store = Arc::clone(&self.store);
         let expiry = Arc::clone(&self.expiry);
 
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_secs(1)); 
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(1));
 
-                let mut expiry_map = expiry.lock().unwrap();
-                let mut store_map = store.lock().unwrap();
+            let mut expiry_map = expiry.lock().unwrap();
+            let mut store_map = store.lock().unwrap();
 
-                let now = Instant::now();
-                expiry_map.retain(|key, &expiry_time| {
-                    if expiry_time <= now {
+            let mut now = SystemTime::now();
+
+            expiry_map.retain(|key, expiry_time| {
+                if let Some(expiry_time) = expiry_time {
+                    if expiry_time <= &mut now {
                         store_map.remove(key);
                         false
                     } else {
                         true
                     }
-                });
-            }
+                } else {
+                    true
+                }
+            });
         });
     }
 }
@@ -129,10 +161,12 @@ impl ConnectionHandler for RedisConnectionHandler {
 
                                     if let Some(expiry_seconds) = expiry_time {
                                         let mut expiry_map = self.expiry.lock().unwrap();
-                                        expiry_map.insert(
-                                            key.to_string(),
-                                            Instant::now() + Duration::from_secs(expiry_seconds),
-                                        );
+
+                                        let expiry_system_time =
+                                            SystemTime::now() + Duration::from_secs(expiry_seconds);
+
+                                        expiry_map
+                                            .insert(key.to_string(), Some(expiry_system_time));
                                     }
 
                                     "+OK\r\n".to_string()
