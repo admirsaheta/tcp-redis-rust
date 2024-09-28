@@ -1,4 +1,5 @@
 use crate::command::{EchoCommand, PingCommand};
+use crate::rdb::{RdbPersistence, RedisData};
 use crate::response::RedisResponse;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -14,15 +15,22 @@ pub trait ConnectionHandler {
 pub struct RedisConnectionHandler {
     store: Arc<Mutex<HashMap<String, String>>>,
     expiry: Arc<Mutex<HashMap<String, Instant>>>,
+    rdb: RdbPersistence,
 }
 
 impl RedisConnectionHandler {
-    pub fn new() -> Self {
+    pub fn new(rdb_file_path: Option<String>) -> Self {
+        let rdb = RdbPersistence::new(rdb_file_path.clone());
+
         let handler = RedisConnectionHandler {
             store: Arc::new(Mutex::new(HashMap::new())),
             expiry: Arc::new(Mutex::new(HashMap::new())),
+            rdb,
         };
-        handler.start_expiry_cleanup();
+
+        handler.load_from_rdb();
+
+        handler.start_expiry_cleanup(); 
         handler
     }
 
@@ -33,25 +41,46 @@ impl RedisConnectionHandler {
         });
     }
 
+    fn load_from_rdb(&self) {
+        if let Some(redis_data) = self.rdb.load_from_rdb() {
+            let mut store = self.store.lock().unwrap();
+            let mut expiry = self.expiry.lock().unwrap();
+            *store = redis_data.store;
+            *expiry = redis_data.expiry;
+        }
+    }
+
+    pub fn save_to_rdb(&self) {
+        let store = self.store.lock().unwrap();
+        let expiry = self.expiry.lock().unwrap();
+        let redis_data = RedisData {
+            store: store.clone(),
+            expiry: expiry.clone(),
+        };
+        self.rdb.save_to_rdb(&redis_data);
+    }
+
     fn start_expiry_cleanup(&self) {
         let store = Arc::clone(&self.store);
         let expiry = Arc::clone(&self.expiry);
 
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(1));
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(1)); 
 
-            let mut expiry_map = expiry.lock().unwrap();
-            let mut store_map = store.lock().unwrap();
+                let mut expiry_map = expiry.lock().unwrap();
+                let mut store_map = store.lock().unwrap();
 
-            let mut now = Instant::now();
-            expiry_map.retain(|key, expiry_time| {
-                if expiry_time <= &mut now {
-                    store_map.remove(key);
-                    false
-                } else {
-                    true
-                }
-            });
+                let now = Instant::now();
+                expiry_map.retain(|key, &expiry_time| {
+                    if expiry_time <= now {
+                        store_map.remove(key);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         });
     }
 }
