@@ -1,6 +1,6 @@
+use crate::connection::RedisConnectionHandler;
 use std::net::TcpListener;
 use std::sync::Arc;
-use crate::connection::RedisConnectionHandler;
 
 mod command;
 mod connection;

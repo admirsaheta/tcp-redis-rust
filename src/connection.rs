@@ -1,19 +1,23 @@
 use crate::command::{EchoCommand, PingCommand};
 use crate::response::RedisResponse;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub trait ConnectionHandler {
     fn handle_client(&self, stream: TcpStream);
 }
 
-pub struct RedisConnectionHandler;
-
+pub struct RedisConnectionHandler {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
 impl RedisConnectionHandler {
     pub fn new() -> Self {
-        RedisConnectionHandler {}
+        RedisConnectionHandler {
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn handle_concurrent_clients(self: Arc<Self>, stream: TcpStream) {
@@ -38,15 +42,41 @@ impl ConnectionHandler for RedisConnectionHandler {
                     let request = String::from_utf8_lossy(&buffer[..bytes_read]);
                     let mut lines = request.lines();
                     if let Some(command_line) = lines.next() {
-                        let response = match command_line.trim() {
+                        let mut parts = command_line.split_whitespace();
+                        let command = parts.next().unwrap_or("");
+
+                        let response = match command {
                             "PING" => {
                                 let ping_command = PingCommand;
                                 ping_command.format_response()
                             }
-                            cmd if cmd.starts_with("ECHO") => {
+                            "ECHO" => {
                                 let echo_command = EchoCommand;
-                                let message = cmd.strip_prefix("ECHO ").map(|s| s.to_string());
+                                let message = parts.next().map(|s| s.to_string());
                                 echo_command.format_response(message)
+                            }
+                            "SET" => {
+                                if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                                    let mut store = self.store.lock().unwrap();
+                                    store.insert(key.to_string(), value.to_string());
+                                    "+OK\r\n".to_string()
+                                } else {
+                                    "-ERR wrong number of arguments for 'SET' command\r\n"
+                                        .to_string()
+                                }
+                            }
+                            "GET" => {
+                                if let Some(key) = parts.next() {
+                                    let store = self.store.lock().unwrap();
+                                    if let Some(value) = store.get(key) {
+                                        format!("${}\r\n{}\r\n", value.len(), value)
+                                    } else {
+                                        "$-1\r\n".to_string()
+                                    }
+                                } else {
+                                    "-ERR wrong number of arguments for 'GET' command\r\n"
+                                        .to_string()
+                                }
                             }
                             _ => "-ERR unknown command\r\n".to_string(),
                         };
